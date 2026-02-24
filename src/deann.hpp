@@ -12,6 +12,7 @@
 #include "RandomSampling.hpp"
 #include "NaiveKde.hpp"
 #include "KdeEstimator.hpp"
+#include "DynamicNaiveKde.hpp"
 
 #endif // DEANN_DEANN_HPP
 

@@ -331,7 +331,154 @@ namespace {
     }
   };
 
+  class DynamicNaiveKdeWrapper {
+  public:
+    DynamicNaiveKdeWrapper(double bandwidth, const string& kernel) {
+      setBandwidth(bandwidth);
+      setKernel(kernel);
+    }
 
+    void fit(const py::array& X) {
+      if (!isCStyleContiguous(X))
+        throw invalid_argument("The dataset must be a C-style contiguous array");
+
+      auto inf = X.request();
+      if (inf.ndim != 2)
+        throw invalid_argument("Dataset must have ndim=2");
+
+      dtype = extractDtype(X);
+      if (dtype != Dtype::FLOAT32 && dtype != Dtype::FLOAT64)
+        throw invalid_argument("Dataset dtype must be float32 or float64");
+
+      n = inf.shape[0];
+      d = inf.shape[1];
+      if (n < 1 || d < 1)
+        throw invalid_argument("Dataset must be non-empty");
+
+      if (dtype == Dtype::FLOAT64) {
+        dynD = std::make_unique<DynamicNaiveKde<double>>(h, K);
+        dynD->fit(n, d, reinterpret_cast<double*>(inf.ptr));
+      } else {
+        dynF = std::make_unique<DynamicNaiveKde<float>>(h, K);
+        dynF->fit(n, d, reinterpret_cast<float*>(inf.ptr));
+      }
+    }
+
+    // returns ids as a 1D numpy array of int_t
+    py::array insert(const py::array& Xnew) {
+      if (!isCStyleContiguous(Xnew))
+        throw invalid_argument("Inserted points must be C-style contiguous");
+
+      auto inf = Xnew.request();
+      if (inf.ndim != 2)
+        throw invalid_argument("Inserted points must have ndim=2");
+
+      if (dtype == Dtype::NONE)
+        throw invalid_argument("fit must be called before insert");
+
+      if (extractDtype(Xnew) != dtype)
+        throw invalid_argument("insert dtype must match fitted dtype");
+
+      int_t m = inf.shape[0];
+      int_t gotD = inf.shape[1];
+      if (gotD != d)
+        throw invalid_argument("dimension mismatch in insert");
+
+      std::vector<int_t> ids;
+      if (dtype == Dtype::FLOAT64) {
+        ids = dynD->insert(m, reinterpret_cast<double*>(inf.ptr));
+      } else {
+        ids = dynF->insert(m, reinterpret_cast<float*>(inf.ptr));
+      }
+
+      py::array out(py::dtype::of<int_t>(), ids.size());
+      auto oinf = out.request();
+      auto* optr = reinterpret_cast<int_t*>(oinf.ptr);
+      std::copy(ids.begin(), ids.end(), optr);
+      n += m;
+      return out;
+    }
+
+    void erase(const py::array& ids) {
+      if (dtype == Dtype::NONE)
+        throw invalid_argument("fit must be called before erase");
+
+      if (!py::isinstance<py::array_t<int_t>>(ids))
+        throw invalid_argument("ids must have dtype int_t");
+
+      if (!isCStyleContiguous(ids))
+        throw invalid_argument("ids must be C-style contiguous");
+
+      auto inf = ids.request();
+      if (inf.ndim != 1)
+        throw invalid_argument("ids must be a 1D array");
+
+      int_t k = inf.shape[0];
+      auto* idptr = reinterpret_cast<int_t*>(inf.ptr);
+
+      if (dtype == Dtype::FLOAT64) dynD->eraseById(k, idptr);
+      else dynF->eraseById(k, idptr);
+
+      // n becomes whatever the estimator currently has
+      n = (dtype == Dtype::FLOAT64) ? dynD->n() : dynF->n();
+    }
+
+    py::array query(const py::array& Q) {
+      if (!isCStyleContiguous(Q))
+        throw invalid_argument("Queries must be C-style contiguous");
+
+      if (dtype == Dtype::NONE)
+        throw invalid_argument("fit must be called before query");
+
+      if (extractDtype(Q) != dtype)
+        throw invalid_argument("query dtype must match fitted dtype");
+
+      auto inf = Q.request();
+      if (inf.ndim > 2)
+        throw invalid_argument("ndim=1 or ndim=2 assumed for queries");
+
+      int_t m = (inf.ndim == 2) ? inf.shape[0] : 1;
+      int_t gotD = (inf.ndim == 2) ? inf.shape[1] : inf.shape[0];
+      if (gotD != d)
+        throw invalid_argument("dimension mismatch in query");
+
+      py::array Z(Q.dtype(), m);
+      auto zinf = Z.request();
+
+      if (dtype == Dtype::FLOAT64) {
+        dynD->query(m, reinterpret_cast<double*>(inf.ptr),
+                   reinterpret_cast<double*>(zinf.ptr));
+      } else {
+        dynF->query(m, reinterpret_cast<float*>(inf.ptr),
+                   reinterpret_cast<float*>(zinf.ptr));
+      }
+      return Z;
+    }
+
+  private:
+    void setBandwidth(double bandwidth) {
+      if (bandwidth <= 0)
+        throw invalid_argument("Bandwidth must be positive");
+      h = bandwidth;
+    }
+
+    void setKernel(const string& kernel) {
+      if (kernel == "exponential") K = Kernel::EXPONENTIAL;
+      else if (kernel == "gaussian") K = Kernel::GAUSSIAN;
+      else if (kernel == "laplacian") K = Kernel::LAPLACIAN;
+      else throw invalid_argument("Supported kernels: exponential, gaussian, laplacian");
+    }
+
+    double h = 0;
+    Kernel K = Kernel::EXPONENTIAL;
+
+    Dtype dtype = Dtype::NONE;
+    int_t n = 0;
+    int_t d = 0;
+
+    std::unique_ptr<DynamicNaiveKde<float>> dynF;
+    std::unique_ptr<DynamicNaiveKde<double>> dynD;
+  };
 
   class RandomSamplingWrapper : public KdeEstimatorWrapper {
   public:
@@ -929,6 +1076,18 @@ multiplication is used to speed up the computation.)pydoc")
 :type kernel: str)pydoc",
 	 py::arg("bandwidth"), py::arg("kernel"));
 
+   py::class_<DynamicNaiveKdeWrapper>(m, "DynamicNaiveKde",
+    R"pydoc(Naive dynamic KDE baseline.
+
+Owns its data internally and supports insertions and deletions. Intended as a
+correctness reference for later dynamic/approximate methods.)pydoc")
+    .def(py::init<double, const string&>(),
+         py::arg("bandwidth"), py::arg("kernel"))
+    .def("fit", &DynamicNaiveKdeWrapper::fit, py::arg("dataset"))
+    .def("insert", &DynamicNaiveKdeWrapper::insert, py::arg("points"))
+    .def("erase", &DynamicNaiveKdeWrapper::erase, py::arg("ids"))
+    .def("query", &DynamicNaiveKdeWrapper::query, py::arg("queries"));
+    
   py::class_<RandomSamplingWrapper,KdeEstimatorWrapper>(m, "RandomSampling",
                                                         R"pydoc(The Random Sampling estimator.
 
