@@ -1,5 +1,8 @@
 # DEANN - Density Estimation from Approximate Nearest Neighbors
 
+> **Work in progress**: This fork extends the original DEANN implementation with support for **dynamic Kernel Density Estimation (KDE)** as part of a Master's thesis project.
+> The goal is to support insertion and deletion of data points while preserving the estimator properties of DEANN.
+
 ## Introduction
 
 This library implements the DEANN algorithm for computing Kernel Density Estimate (KDE) values as described in *arXiv link pending.* The library is written in C++ and can be compiled as a Python module. The library uses [Intel MKL](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html) as backend for performant single-CPU computation.
